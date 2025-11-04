@@ -161,15 +161,25 @@
         }
     </style>
 </head>
-<body>
+
+ <body>
 
     <div class="container">
         <div class="header">
             <h1>崇華十四期課堂測驗</h1>
         </div>
 
+        <div id="statusModal" class="modal" style="display: none;">
+            <div class="modal-content">
+                <h3 id="modalTitle">訊息</h3>
+                <p id="modalMessage"></p>
+                <button onclick="document.getElementById('statusModal').style.display='none'">確定</button>
+            </div>
+        </div>
+
         <div id="selection-container" class="selection-container">
             <h2>請先選擇你的考卷、組別與姓名</h2>
+            <p id="loading-status" style="color:#1f78c9;">正在透過 Apps Script 載入名單資料...</p>
             <select id="quiz-type-select">
                 <option value="" disabled selected>請選擇經典科目</option>
                 <option value="論語">論語</option>
@@ -187,8 +197,7 @@
         </div>
         
         <div id="quiz-container" style="display:none;">
-            <!-- 測驗題目將在這裡動態生成 -->
-        </div>
+            </div>
 
         <div class="button-group" style="display:none;">
             <button id="submit-btn" onclick="calculateScore()">送出答案</button>
@@ -199,50 +208,53 @@
             <p>考卷類型：<span id="quiz-type-result"></span></p>
             <p>組別：<span id="group-result"></span></p>
             <p>姓名：<span id="name-result"></span></p>
-            <p>你的得分：<span id="score"></span> 分</p>
+            <p>你的得分：<span id="score"></span></p>
             <p id="wrong-questions" style="color: red; font-weight: bold;"></p>
             <div id="feedback"></div>
         </div>
     </div>
 
     <script>
-        // API key will be provided by the environment
-        const API_KEY = "";
-        
-        // *** 這裡填入你的 Google 試算表 ID (同時包含題目與名單資料) ***
-        const SPREADSHEET_ID = '1LRPB-bZdvGyqgOO_vBTeW5xhOweuJPI4qQArEiNPZI4';
-        
-        // *** 這裡填入您存放「組別與姓名」工作表的 gid，例如：123456789 ***
-        const TEAMS_SHEET_GID = '1026036029';
-
-        // *** 請將這裡替換成你部署的 Google Apps Script 網址 ***
-        const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbw0O_VGBxXglBZifcFaugdJu_w_jA7ClEovJl14ur22SBQm0CSrVTfoeiu_jgn5VyJzBA/exec';
-
-        // *** 請將這裡的 GID 替換成您各個測驗工作表的實際 GID ***
-        const QUIZ_GIDS = {
-            '隨堂': '0',
-            '論語': '1250135497',
-            '性理': '1342680959',
-            '道德經': '1246480043',
-            '六祖': '1302889740',
-        };
-
-        // 這是 Google 試算表公開查詢的 API 網址，會將資料轉成 JSON 格式
-        const GOOGLE_SHEET_BASE_URL = `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/gviz/tq?tqx=out:json&gid=`;
-        const TEAMS_SHEET_URL = `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/gviz/tq?tqx=out:json&gid=${TEAMS_SHEET_GID}`;
-
-        // 用來存放從試算表讀取到的題目資料
-        let quizData = [];
+        // --- 全域變數和狀態設定 ---
         const quizContainer = document.getElementById('quiz-container');
         const selectionContainer = document.getElementById('selection-container');
         const buttonGroup = document.querySelector('.button-group');
-        let userAnswers = []; // 用來儲存使用者的答案
-        let selectedQuizType = '';
-        let selectedGroup = '';
-        let selectedName = '';
-        let teamsData = {};
+        const quizTypeSelect = document.getElementById('quiz-type-select');
+        const groupSelect = document.getElementById('group-select');
+        const nameSelect = document.getElementById('name-select');
+        const startBtn = document.getElementById('start-btn');
+        const loadingStatus = document.getElementById('loading-status');
 
-        // 隨機打亂陣列順序的函式（Fisher-Yates shuffle）
+        let quizData = [];         // 儲存從 Apps Script 載入的題目資料
+        let userAnswers = [];      // 儲存使用者的作答紀錄 (簡化結構，用於後端展開)
+        let selectedQuizType = ''; // 儲存使用者選擇的考卷科目
+        let selectedGroup = '';    // 儲存使用者選擇的組別
+        let selectedName = '';     // 儲存使用者選擇的姓名
+        let teamsData = {};        // 儲存從 Apps Script 載入的組別/姓名名單
+
+        // --- 輔助函式 ---
+
+        /**
+         * 顯示自訂 Modal 視窗
+         */
+        function showModal(title, message) {
+            document.getElementById('modalTitle').innerText = title;
+            document.getElementById('modalMessage').innerHTML = message;
+            document.getElementById('statusModal').style.display = 'flex';
+        }
+
+        /**
+         * Apps Script 呼叫失敗時的統一處理函式
+         */
+        function handleFailure(error) {
+            loadingStatus.innerHTML = `<span style="color:red;">資料載入失敗！</span><br>請確認 **Code.gs** 中的常數設定是否正確。<br>錯誤: ${error.message}`;
+            showModal('Apps Script 錯誤', error.message);
+            console.error('Apps Script 呼叫失敗:', error);
+        }
+
+        /**
+         * 隨機打亂陣列順序的函式
+         */
         function shuffleArray(array) {
             for (let i = array.length - 1; i > 0; i--) {
                 const j = Math.floor(Math.random() * (i + 1));
@@ -250,60 +262,144 @@
             }
             return array;
         }
+        
+        /**
+         * 將中文數字 '一' 到 '十' 轉換為對應的數值 (用於組別排序)
+         */
+        function chineseNumeralToNumber(numeral) {
+            const units = { '零': 0, '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10 };
+            let total = 0;
+            let currentNum = 0;
 
-        // 從 Google 試算表讀取組別與姓名資料
-        async function fetchTeamsData() {
-            try {
-                const response = await fetch(TEAMS_SHEET_URL);
-                const text = await response.text();
-                const jsonText = text.substring(text.indexOf('{'), text.lastIndexOf('}') + 1);
-                const data = JSON.parse(jsonText);
-
-                teamsData = {};
-                const rows = data.table.rows;
-                rows.forEach(row => {
-                    const group = row.c[0] && row.c[0].v ? row.c[0].v : null;
-                    const name = row.c[1] && row.c[1].v ? row.c[1].v : null;
-                    if (group && name) {
-                        if (!teamsData[group]) {
-                            teamsData[group] = [];
-                        }
-                        teamsData[group].push(name);
+            for (let i = 0; i < numeral.length; i++) {
+                const char = numeral[i];
+                if (char in units) {
+                    currentNum = units[char];
+                    if (currentNum > 0 && total === 0) {
+                        total += currentNum;
                     }
-                });
-                
-                populateGroups();
-            } catch (error) {
-                console.error('載入組別與姓名資料失敗:', error);
-                selectionContainer.innerHTML = '<p style="color:red;">載入組別資料失敗。請確認你的組別工作表 GID 是否正確，並已設定為「任何知道連結的人都可以檢視」。</p>';
+                } else if (char === '十') {
+                    if (total === 0) {
+                        total = 10;
+                    } else if (currentNum !== 0) { 
+                        total = (total - currentNum) + (currentNum * 10);
+                    } else { 
+                        total *= 10;
+                    }
+                    currentNum = 0;
+                }
             }
+            return total;
         }
 
-        function populateGroups() {
-            const groupSelect = document.getElementById('group-select');
-            for (const group in teamsData) {
-                const option = document.createElement('option');
-                option.value = group;
-                option.text = group;
-                groupSelect.appendChild(option);
+        /**
+         * 根據組別名稱，返回一個用於排序的數字權重。
+         */
+        function getGroupNumericalOrder(groupName) {
+            if (groupName.includes('主領班')) {
+                return 1000; 
+            }
+            const match = groupName.match(/(?:第)?(一|二|三|四|五|六|七|八|九|十)組/);
+
+            if (match) {
+                const chineseNum = match[1];
+                const numberOrder = chineseNumeralToNumber(chineseNum);
+                
+                if (numberOrder >= 1 && numberOrder <= 10) {
+                    return numberOrder;
+                }
+            }
+            return 100; 
+        }
+
+        // --- 核心 Apps Script 互動與名單處理 ---
+
+        /**
+         * 啟動函式：向 Apps Script 請求組別與姓名名單資料
+         */
+        function fetchTeamsData() {
+            loadingStatus.innerText = '正在透過 Apps Script 載入名單資料...';
+            google.script.run
+                .withSuccessHandler(handleTeamsDataSuccess)
+                .withFailureHandler(handleFailure)
+                .getTeamsData();
+        }
+
+        /**
+         * 處理名單資料成功回傳
+         */
+        function handleTeamsDataSuccess(data) {
+            teamsData = data;
+            
+            if (Object.keys(teamsData).length === 0) {
+                const message = 'Apps Script 成功執行，但名單中找不到任何有效的組別或姓名資料，請確認資料在 **Code.gs** 設定的**名單**工作表 A、B 兩欄。';
+                loadingStatus.innerHTML = `<span style="color:orange;">${message}</span>`;
+                showModal('名單警告', message);
+                return;
             }
 
-            const quizTypeSelect = document.getElementById('quiz-type-select');
+            loadingStatus.innerText = '名單載入完成，請選擇科目。';
+            loadingStatus.style.color = '#4CAF50';
+            setupEventListeners(); 
+            populateGroupOptions(); 
+        }
+
+        /**
+         * 設置下拉選單的事件監聽器
+         */
+        function setupEventListeners() {
             quizTypeSelect.addEventListener('change', (e) => {
                 selectedQuizType = e.target.value;
-                groupSelect.disabled = false;
+                selectedGroup = '';
+                selectedName = '';
+                groupSelect.selectedIndex = 0; 
+                nameSelect.innerHTML = '<option value="" disabled selected>請選擇姓名</option>';
+                nameSelect.disabled = true;
+                groupSelect.disabled = false; 
                 checkStartButton();
             });
 
             groupSelect.addEventListener('change', (e) => {
                 selectedGroup = e.target.value;
-                populateNames(selectedGroup);
+                populateNameOptions(selectedGroup);
+                checkStartButton();
+            });
+            
+            nameSelect.addEventListener('change', (e) => {
+                selectedName = e.target.value;
                 checkStartButton();
             });
         }
 
-        function populateNames(group) {
-            const nameSelect = document.getElementById('name-select');
+        /**
+         * 填充組別選項
+         */
+        function populateGroupOptions() {
+            groupSelect.innerHTML = '<option value="" disabled selected>請選擇組別</option>';
+            let groups = Object.keys(teamsData);
+
+            groups.sort((a, b) => {
+                const numA = getGroupNumericalOrder(a);
+                const numB = getGroupNumericalOrder(b);
+
+                if (numA !== numB) {
+                    return numA - numB;
+                }
+                return a.localeCompare(b, 'zh-TW', { sensitivity: 'base' });
+            });
+
+            groups.forEach(group => {
+                const option = document.createElement('option');
+                option.value = group;
+                option.text = group;
+                groupSelect.appendChild(option);
+            });
+        }
+
+        /**
+         * 根據選擇的組別，填充對應的姓名選項
+         */
+        function populateNameOptions(group) {
             nameSelect.innerHTML = '<option value="" disabled selected>請選擇姓名</option>';
             if (teamsData[group]) {
                 teamsData[group].forEach(name => {
@@ -316,87 +412,75 @@
             } else {
                 nameSelect.disabled = true;
             }
-
-            nameSelect.addEventListener('change', (e) => {
-                selectedName = e.target.value;
-                checkStartButton();
-            });
         }
 
+        /**
+         * 檢查所有選擇器是否都已選定，並啟用/禁用開始測驗按鈕
+         */
         function checkStartButton() {
-            const startBtn = document.getElementById('start-btn');
             if (selectedQuizType && selectedGroup && selectedName) {
                 startBtn.disabled = false;
+                loadingStatus.innerText = '所有資訊皆已選定，可以開始測驗。';
             } else {
-            startBtn.disabled = true;
+                startBtn.disabled = true;
             }
         }
 
+        // --- 測驗流程函式 ---
+
+        /**
+         * 開始測驗流程：載入「隨堂」和「科目」兩份考卷
+         */
         function startQuiz() {
             selectionContainer.style.display = 'none';
             quizContainer.style.display = 'block';
-            quizContainer.innerHTML = '<div class="loading-text">正在從 Google 試算表載入題目...</div>';
-            fetchCombinedQuizData();
-        }
-
-        async function fetchQuizData(quizType) {
-            try {
-                const quizGid = QUIZ_GIDS[quizType];
-                if (!quizGid) {
-                    console.error(`找不到考卷類型 '${quizType}' 對應的 GID。`);
-                    return [];
-                }
-                const quizSheetUrl = `${GOOGLE_SHEET_BASE_URL}${quizGid}`;
-                
-                const response = await fetch(quizSheetUrl);
-                const text = await response.text();
-                const jsonText = text.substring(text.indexOf('{'), text.lastIndexOf('}') + 1);
-                const data = JSON.parse(jsonText);
-
-                const questions = [];
-                const rows = data.table.rows;
-                rows.forEach(row => {
-                    const cells = row.c;
-                    const question = cells[0] && cells[0].v ? cells[0].v : '';
-                    const type = cells[1] && cells[1].v ? cells[1].v.toLowerCase() : '';
-                    const options = cells[2] && cells[2].v ? String(cells[2].v).split(',').map(item => item.trim()) : [];
-                    const answerValue = cells[3] && cells[3].v !== undefined ? String(cells[3].v) : '';
-                    const answer = answerValue ? answerValue.split(',').map(item => item.trim()) : [];
-                    const score = cells[4] && cells[4].v ? parseFloat(cells[4].v) : 0; // 修改這裡，使用 parseFloat
-                    const imageUrl = cells[5] && cells[5].v ? cells[5].v : '';
-                    
-                    if (question && ['single', 'multiple', 'fill'].includes(type) && answer.length > 0) {
-                        questions.push({ question, type, options, answer, score, imageUrl });
-                    }
-                });
-                return questions;
-
-            } catch (error) {
-                console.error(`載入 '${quizType}' 測驗資料失敗:`, error);
-                return [];
-            }
-        }
-
-        async function fetchCombinedQuizData() {
-            const [mandatoryQuiz, optionalQuiz] = await Promise.all([
-                fetchQuizData('隨堂'),
-                fetchQuizData(selectedQuizType)
-            ]);
-            quizData = [...mandatoryQuiz, ...optionalQuiz];
-
+            
+            quizContainer.innerHTML = '<div class="loading-text" id="quiz-loading-message">正在透過 Apps Script 載入**必做隨堂題目**... (步驟 1/2)</div>';
+            
             const quizTypeResult = document.getElementById('quiz-type-result');
             if (quizTypeResult) {
                 quizTypeResult.innerText = `隨堂 + ${selectedQuizType}`;
             }
 
+            google.script.run
+                .withSuccessHandler(handleMandatoryQuizSuccess)
+                .withFailureHandler(handleFailure)
+                .getQuizData('隨堂'); 
+        }
+        
+        /**
+         * 處理隨堂考卷 (Mandatory) 成功回傳
+         */
+        function handleMandatoryQuizSuccess(mandatoryData) {
+            quizData = mandatoryData; 
+            
+            const loadingMsg = document.getElementById('quiz-loading-message');
+            if (loadingMsg) {
+                 loadingMsg.innerHTML = `✅ 隨堂題目載入完成。正在載入**${selectedQuizType}**的題目... (步驟 2/2)`;
+            }
+
+            google.script.run
+                .withSuccessHandler(handleOptionalQuizSuccess)
+                .withFailureHandler(handleFailure)
+                .getQuizData(selectedQuizType);
+        }
+
+        /**
+         * 處理選擇科目考卷 (Optional) 成功回傳
+         */
+        function handleOptionalQuizSuccess(optionalData) {
+            quizData = [...quizData, ...optionalData]; 
+
             if (quizData.length > 0) {
-                renderQuiz();
+                renderQuiz(); 
             } else {
-                quizContainer.innerHTML = '<div class="loading-text">無法載入題目，請檢查試算表ID或分享設定。</div>';
+                quizContainer.innerHTML = '<div class="loading-text" style="color:red;">無法載入題目，請檢查 Code.gs 中的 QUIZ_SHEETS_NAMES 設定是否正確，以及題庫工作表是否存在。</div>';
             }
         }
 
-
+        /**
+         * 根據 quizData 渲染題目到網頁上
+         */
         function renderQuiz() {
             quizContainer.innerHTML = '';
             let quizHTML = '';
@@ -406,9 +490,13 @@
                 let optionsHTML = '';
                 const inputType = item.type === 'single' ? 'radio' : 'checkbox';
                 
+                // 處理題目提示 (加分題)
+                const bonusLabel = item.isBonus ? '<span style="color: orange; font-weight: normal; margin-left: 10px;"></span>' : '';
+                
+                // 處理圖片顯示
                 let imageHTML = '';
                 if (item.imageUrl) {
-                    const isDirectLink = /\.(jpg|jpeg|png|gif|svg)$/i.test(item.imageUrl);
+                    const isDirectLink = /\.(jpg|jpeg|png|gif|svg|webp|bmp|tiff)$/i.test(item.imageUrl);
                     
                     if (isDirectLink) {
                         imageHTML = `<img src="${item.imageUrl}" alt="題目圖片" onerror="this.onerror=null; this.src='https://placehold.co/400x150/ffcccc/c00000?text=圖片載入失敗！'; this.style.border='2px dashed #c00000';">`;
@@ -423,13 +511,15 @@
                 }
 
                 if (item.type === 'single' || item.type === 'multiple') {
-                    const shuffledOptions = shuffleArray([...item.options]);
-                    shuffledOptions.forEach((option, optIndex) => {
+                    const shuffledOptions = shuffleArray([...item.options]); 
+                    
+                    shuffledOptions.forEach((option) => {
                         optionsHTML += `<label><input type="${inputType}" name="q${questionNumber}" value="${option}"> ${option}</label>`;
                     });
+                    
                     quizHTML += `
                         <div class="question" id="q${questionNumber}">
-                            <p>${item.question} <span style="font-size: 0.8em; color: #888;">(${item.score}分)</span></p>
+                            <p>${questionNumber}. ${item.question} <span style="font-size: 0.8em; color: #888;">(${item.score.toFixed(1)}分)</span>${bonusLabel}</p>
                             ${imageHTML}
                             <div class="options">
                                 ${optionsHTML}
@@ -440,7 +530,7 @@
                 } else if (item.type === 'fill') {
                     quizHTML += `
                         <div class="question" id="q${questionNumber}">
-                            <p>${item.question} <span style="font-size: 0.8em; color: #888;">(${item.score}分)</span></p>
+                            <p>${questionNumber}. ${item.question} <span style="font-size: 0.8em; color: #888;">(${item.score.toFixed(1)}分)</span>${bonusLabel}</p>
                             ${imageHTML}
                             <input type="text" class="fill-in-the-blank" id="q${questionNumber}_answer">
                             <div class="answer-feedback"></div>
@@ -450,32 +540,38 @@
             });
 
             quizContainer.innerHTML = quizHTML;
-            buttonGroup.style.display = 'block';
+            buttonGroup.style.display = 'block'; 
         }
 
+        /**
+         * 計算分數，顯示結果，並準備提交資料 (已包含「加分題有寫就有分」的特殊規則，結果只顯示總分)
+         */
         function calculateScore() {
-            let userScore = 0;
-            const feedbackDiv = document.getElementById('feedback');
-            feedbackDiv.innerHTML = '';
-            userAnswers = [];
+            let regularScore = 0;   
+            let bonusScore = 0;     
+            let totalScore = 0;     
+            
+            userAnswers = []; // 簡化數據，用於後端展開
             const wrongQuestions = [];
             
             quizData.forEach((item, index) => {
                 const qId = `q${index + 1}`;
                 const questionElement = document.getElementById(qId);
                 
-                if (!questionElement) {
-                    console.error(`無法找到 ID 為 ${qId} 的題目元素。已跳過。`);
-                    return;
-                }
+                if (!questionElement) return;
 
                 const feedbackElement = questionElement.querySelector('.answer-feedback');
-                let isCorrect = false;
+                const isBonus = item.isBonus === true; 
+                let isCorrect = false;      
+                let hasAnswered = false;    
                 let userAnswerText = '';
+                let isScored = '否';
 
+                // --- 判斷作答是否正確及是否有作答 ---
                 if (item.type === 'single') {
                     const userAnswer = document.querySelector(`input[name="${qId}"]:checked`);
                     userAnswerText = userAnswer ? userAnswer.value : '未作答';
+                    hasAnswered = !!userAnswer; 
                     if (userAnswer && userAnswer.value === item.answer[0]) {
                         isCorrect = true;
                     }
@@ -483,58 +579,95 @@
                     const userAnswersArr = Array.from(document.querySelectorAll(`input[name="${qId}"]:checked`)).map(el => el.value).sort();
                     const correctAnswersSorted = item.answer.sort();
                     userAnswerText = userAnswersArr.join(', ') || '未作答';
+                    hasAnswered = userAnswersArr.length > 0; 
                     if (JSON.stringify(userAnswersArr) === JSON.stringify(correctAnswersSorted)) {
                         isCorrect = true;
                     }
                 } else if (item.type === 'fill') {
                     const userAnswerInput = document.getElementById(`${qId}_answer`);
                     userAnswerText = userAnswerInput ? userAnswerInput.value.trim() : '未作答';
-                    if (userAnswerText === item.answer[0]) {
+                    hasAnswered = userAnswerText.length > 0; 
+                    if (item.answer.map(a => a.toLowerCase()).includes(userAnswerText.toLowerCase())) {
                         isCorrect = true;
                     }
                 }
 
-                if (isCorrect) {
-                    userScore += item.score;
-                    feedbackElement.innerHTML = `<span class="correct">✔ 正確</span><br>獲得 ${item.score} 分`;
-                } else {
-                    wrongQuestions.push(index + 1);
-                    const correctAnswerText = item.answer.join(', ');
-                    feedbackElement.innerHTML = `<span class="incorrect">✘ 錯誤</span>。正確答案是：${correctAnswerText}`;
-                }
+                // --- 根據作答結果更新分數和回饋訊息 ---
+                let scoreText = '';
                 
+                if (isBonus) {
+                    // ** 加分題的特殊邏輯：只要有寫，就給分 **
+                    if (hasAnswered) {
+                        bonusScore += item.score; 
+                        scoreText = `<span class="correct">✔ 答題成功</span><br><span style="color: #ff9800;">獲得${item.score.toFixed(1)} </span>`;
+                        isScored = '是';
+                    } else {
+                        scoreText = `<span class="incorrect">✘ 未作答</span>`;
+                        wrongQuestions.push(index + 1);
+                        isScored = '否';
+                    }
+                    
+                    const correctAnswerText = item.answer.join(', ');
+                    feedbackElement.innerHTML = `${scoreText}
+                    
+                } else {
+                    // ** 標準題的正常邏輯：答對才給分 **
+                    if (isCorrect) {
+                        regularScore += item.score; 
+                        feedbackElement.innerHTML = `<span class="correct">✔ 正確</span><br><span style="color: #ff9800;">獲得 ${item.score.toFixed(1)} 分`;
+                        isScored = '是';
+                    } else {
+                        wrongQuestions.push(index + 1);
+                        const correctAnswerText = item.answer.join(', ');
+                        feedbackElement.innerHTML = `<span class="incorrect">✘ 錯誤</span>。正確答案是：${correctAnswerText}`;
+                        isScored = '否';
+                    }
+                }
+
+                // 記錄每題的簡化數據，用於後端展開
                 userAnswers.push({
-                    question: item.question,
-                    userAnswer: userAnswerText,
-                    correctAnswer: item.answer.join(', '),
-                    isCorrect: isCorrect ? '是' : '否'
+                    qNum: index + 1,
+                    isScored: isScored, // 是否得分
+                    user: userAnswerText,
+                    correct: item.answer.join(', '),
                 });
             });
 
-            const allInputs = document.querySelectorAll('#quiz-container input, #submit-btn');
+            totalScore = regularScore + bonusScore; 
+
+            // 禁用所有輸入元素，防止再次修改答案
+            const allInputs = document.querySelectorAll('#quiz-container input');
             allInputs.forEach(input => {
                 input.disabled = true;
             });
 
-            document.getElementById('quiz-type-result').innerText = `隨堂 + ${selectedQuizType}`;
+            // 顯示最終結果區
             document.getElementById('group-result').innerText = selectedGroup;
             document.getElementById('name-result').innerText = selectedName;
-            document.getElementById('score').innerText = userScore.toFixed(1); // 修改這裡，顯示一位小數
+            
+            // 這裡已修改：只顯示總分
+            document.getElementById('score').innerHTML = 
+                `${totalScore.toFixed(1)} 分`;
             
             const wrongQuestionsElement = document.getElementById('wrong-questions');
-            if (wrongQuestions.length > 0) {
-                wrongQuestionsElement.innerText = `你答錯了第 ${wrongQuestions.join('、')} 題`;
-            } else {
-                wrongQuestionsElement.innerText = '恭喜你！全部答對了！';
+            if (wrongQuestions.length === 0) {
+                 wrongQuestionsElement.innerText = '恭喜你！所有題目都獲得分數！';
+            } else if (wrongQuestions.length > 0) {
+                // 這裡只顯示未得分的題目編號 (標準題答錯 + 加分題未作答)
+                wrongQuestionsElement.innerText = `你沒有得分的題目是第 ${wrongQuestions.join('、')} 題`;
             }
             
             document.querySelector('.result-box').style.display = 'block';
             document.querySelector('.result-box').scrollIntoView({ behavior: 'smooth' });
 
-            sendAnswersToGoogleSheet(userScore);
+            // 提交答案到 Apps Script
+            sendAnswersToGoogleSheet(totalScore, regularScore, bonusScore); 
         }
 
-        async function sendAnswersToGoogleSheet(finalScore) {
+        /**
+         * 將成績和作答詳情傳送給 Apps Script 儲存
+         */
+        function sendAnswersToGoogleSheet(finalScore, regularScore, bonusScore) {
             const submitButton = document.getElementById('submit-btn');
             submitButton.disabled = true;
             submitButton.innerText = '正在傳送...';
@@ -544,42 +677,46 @@
             const dataToSend = {
                 group: selectedGroup,
                 name: selectedName,
-                score: finalScore,
+                score: finalScore.toFixed(1),      
+                regularScore: regularScore.toFixed(1), 
+                bonusScore: bonusScore.toFixed(1),   
                 quizType: quizTypeDisplay,
-                answers: userAnswers.map(answer => ({
-                    question: answer.question,
-                    userAnswer: answer.userAnswer,
-                    correctAnswer: answer.correctAnswer,
-                    isCorrect: answer.isCorrect
-                }))
+                answers: userAnswers // 簡化後的答案陣列
             };
 
-            try {
-                const response = await fetch(APPS_SCRIPT_URL, {
-                    method: 'POST',
-                    mode: 'no-cors',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify(dataToSend)
-                });
-
-                alert('答案已成功傳送到 Google 試算表！');
-
-            } catch (error) {
-                console.error('傳送答案到 Google 試算表時發生錯誤:', error);
-                alert('傳送答案失敗，請檢查網路連線或 Apps Script 設定。');
-            } finally {
-                submitButton.disabled = false;
-                submitButton.innerText = '送出答案';
-            }
+            google.script.run
+                .withSuccessHandler(handleSubmissionSuccess)
+                .withFailureHandler(handleSubmissionFailure)
+                .saveScore(dataToSend);
         }
 
+        /**
+         * 處理成績提交成功
+         */
+        function handleSubmissionSuccess(result) {
+            document.getElementById('submit-btn').innerText = '成績已送出';
+            showModal('提交成功', result);
+        }
+
+        /**
+         * 處理成績提交失敗
+         */
+        function handleSubmissionFailure(error) {
+            const submitButton = document.getElementById('submit-btn');
+            submitButton.disabled = false;
+            submitButton.innerText = '送出答案 (失敗，請重試)';
+            showModal('提交失敗', `成績無法記錄到試算表。錯誤訊息：${error.message}`);
+            console.error('成績提交失敗:', error);
+        }
+
+
+        // --- 網頁載入完成，啟動資料抓取 ---
         window.onload = fetchTeamsData;
     </script>
 
 </body>
 </html>
+
 
 
 
